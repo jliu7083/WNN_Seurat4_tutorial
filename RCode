@@ -1,0 +1,155 @@
+#remotes::install_github("satijalab/seurat", ref = "release/4.0.0")
+#remotes::install_github("jlmelville/uwot")
+library(Seurat)
+#install.packages("processx")
+#devtools::install_github('satijalab/seurat-data')
+library(SeuratData)
+library(cowplot)
+library(dplyr)
+#AvailableData()
+InstallData("bmcite")
+bm <- LoadData(ds = "bmcite")
+# first perform pre-processing and dimensional reduction on both assays independently.
+# We use standard normalization, but you can also use SCTransform or any alternative method.
+DefaultAssay(bm) <- 'RNA'
+bm <- NormalizeData(bm) %>% FindVariableFeatures() %>% ScaleData() %>% RunPCA()
+
+DefaultAssay(bm) <- 'ADT'
+# we will use all ADT features for dimensional reduction
+# we set a dimensional reduction name to avoid overwriting the 
+VariableFeatures(bm) <- rownames(bm[["ADT"]])
+bm <- NormalizeData(bm, normalization.method = 'CLR', margin = 2) %>% 
+  ScaleData() %>% RunPCA(reduction.name = 'apca')
+##
+#
+bm <- FindMultiModalNeighbors(
+  bm, reduction.list = list("pca", "apca"), 
+  dims.list = list(1:30, 1:18), modality.weight.name = "RNA.weight"
+)
+
+#visualization and clustering
+bm <- RunUMAP(bm, nn.name = "weighted.nn", reduction.name = "wnn.umap", reduction.key = "wnnUMAP_")
+bm <- FindClusters(bm, graph.name = "wsnn", algorithm = 3, resolution = 2, verbose = FALSE)
+p1 <- DimPlot(bm, reduction = 'wnn.umap', label = TRUE, repel = TRUE, label.size = 2.5) + NoLegend()
+p2 <- DimPlot(bm, reduction = 'wnn.umap', group.by = 'celltype.l2', label = TRUE, repel = TRUE, label.size = 2.5) + NoLegend()
+p1 + p2
+#compute UMAP visualization based on only the RNA OR protein data
+
+bm <- RunUMAP(bm, reduction = 'pca', dims = 1:30, assay = 'RNA', 
+              reduction.name = 'rna.umap', reduction.key = 'rnaUMAP_')
+bm <- RunUMAP(bm, reduction = 'apca', dims = 1:18, assay = 'ADT', 
+              reduction.name = 'adt.umap', reduction.key = 'adtUMAP_')
+p3 <- DimPlot(bm, reduction = 'rna.umap', group.by = 'celltype.l2', label = TRUE, 
+              repel = TRUE, label.size = 2.5) + NoLegend()
+p4 <- DimPlot(bm, reduction = 'adt.umap', group.by = 'celltype.l2', label = TRUE, 
+              repel = TRUE, label.size = 2.5) + NoLegend()
+p3 + p4
+#
+
+p5 <- FeaturePlot(bm, features = c("adt_CD45RA","adt_CD16","adt_CD161"),
+                  reduction = 'wnn.umap', max.cutoff = 2, 
+                  cols = c("lightgrey","darkgreen"), ncol = 3)
+p6 <- FeaturePlot(bm, features = c("rna_TRDC","rna_MPO","rna_AVP"), 
+                  reduction = 'wnn.umap', max.cutoff = 3, ncol = 3)
+p5 / p6
+
+#
+VlnPlot(bm, features = "RNA.weight", group.by = 'celltype.l2', sort = TRUE, pt.size = 0.1) +
+  NoLegend()
+
+
+############### --- start from csv and h5 files, not seurat object-----
+library(Seurat)
+library(cowplot)
+library(dplyr)
+library("tibble")
+library("tidyverse")
+###
+# Data URL
+data_url <- "https://scrnaseq-workshop.s3-us-west-2.amazonaws.com"
+
+# Function to import counts
+import_counts <- function(file_name, file_url = data_url) {
+  mtx <- file.path(file_url, file_name) %>%
+    read_csv() %>%
+    column_to_rownames("X1") %>%
+    as.sparse()
+  
+  mtx
+}
+
+# Import gene expression matrix
+rna_mtx <- import_counts("CITEseq_cDNA.csv.gz")
+# Import CITE-seq matrix
+adt_mtx <- import_counts("CITEseq_ADT.csv.gz")
+
+rownames(adt_mtx) <- str_c("adt-", rownames(adt_mtx))
+adt_mtx[, 1:10]
+
+# Import HTO matrix
+hto_mtx <- import_counts("CITEseq_HTO.csv.gz")
+hto_mtx[, 1:10]
+
+
+###---Creating a Seurat object
+##identify cell barcodes that are present in all of the datasets
+#Get list of common cell barcodes
+rna_bcs <- colnames(rna_mtx)
+adt_bcs <- colnames(adt_mtx)
+hto_bcs <- colnames(hto_mtx)
+
+merged_bcs <-  intersect(rna_bcs, adt_bcs) %>%
+  intersect(hto_bcs)
+## Create Seurat object
+sobj <-  CreateSeuratObject(rna_mtx[, merged_bcs], 
+                            min.cells = 5)
+# Add CITE-seq and cell hashing data to Seurat object
+sobj[["ADT"]] <-  CreateAssayObject(adt_mtx[, merged_bcs])
+sobj[["HTO"]] <- CreateAssayObject(hto_mtx[, merged_bcs])
+sobj
+
+
+#####----start WNN--
+DefaultAssay(sobj) <- 'RNA'
+sobj <- NormalizeData(sobj) %>% FindVariableFeatures() %>% ScaleData() %>% RunPCA()
+
+DefaultAssay(sobj) <- 'ADT'
+# we will use all ADT features for dimensional reduction
+# we set a dimensional reduction name to avoid overwriting the 
+VariableFeatures(sobj) <- rownames(sobj[["ADT"]])
+sobj <- NormalizeData(sobj, normalization.method = 'CLR', margin = 2) %>% 
+  ScaleData() %>% RunPCA(reduction.name = 'apca')
+
+
+# Identify multimodal neighbors. These will be stored in the neighbors slot, 
+# and can be accessed using bm[['weighted.nn']]
+# The WNN graph can be accessed at bm[["wknn"]], 
+# and the SNN graph used for clustering at bm[["wsnn"]]
+# Cell-specific modality weights can be accessed at bm$RNA.weight
+sobj <- FindMultiModalNeighbors(
+  sobj, reduction.list = list("pca", "apca"), 
+  dims.list = list(1:30, 1:6), modality.weight.name = "RNA.weight"
+)
+#
+sobj <- RunUMAP(sobj , nn.name = "weighted.nn", reduction.name = "wnn.umap", reduction.key = "wnnUMAP_")
+sobj  <- FindClusters(sobj , graph.name = "wsnn", algorithm = 3, resolution = 2, verbose = FALSE)
+p1 <- DimPlot(sobj, reduction = 'wnn.umap', label = TRUE, repel = TRUE, label.size = 2.5) + NoLegend()
+p2 <- DimPlot(sobj, reduction = 'wnn.umap',  label = TRUE, repel = TRUE, label.size = 2.5) + NoLegend()
+p1 + p2
+
+#compute UMAP visualization based on only the RNA OR protein data
+
+sobj <- RunUMAP(sobj, reduction = 'pca', dims = 1:30, assay = 'RNA', 
+              reduction.name = 'rna.umap', reduction.key = 'rnaUMAP_')
+sobj <- RunUMAP(sobj, reduction = 'apca', dims = 1:7, assay = 'ADT', 
+              reduction.name = 'adt.umap', reduction.key = 'adtUMAP_')
+p3 <- DimPlot(sobj, reduction = 'rna.umap', #group.by = 'celltype.l2', 
+              label = TRUE, repel = TRUE, label.size = 2.5) + NoLegend()
+p4 <- DimPlot(sobj, reduction = 'adt.umap', #group.by = 'celltype.l2', 
+              label = TRUE, repel = TRUE, label.size = 2.5) + NoLegend()
+p3 + p4
+
+
+###- outputs
+w.nn<-sobj[['weighted.nn']]
+wknn_o<-sobj[["wknn"]]
